@@ -12,18 +12,22 @@ FootyStats no aplica al Mundial (confirmado en el protocolo: N/A para mundial).
 Flujo:
   1. Llama a FootyStats API (4 ligas del plan Hobby, hoy solo usamos Primera Argentina)
   2. Normaliza: form (últimos 5), H2H, xG por equipo
-  3. Autentica con cuenta de servicio de Google
+  3. Autentica con OAuth (cuenta personal de Fer)
   4. Sube un archivo NUEVO versionado a Drive (no sobreescribe — mismo patrón
      que ya usás en el proyecto: footystats_data_2026-08-15.json, etc.)
   5. Termina y libera recursos (requisito de Railway cron: el proceso debe
      salir solo, si no, la próxima ejecución programada se salta)
 
 Variables de entorno requeridas en Railway:
-  FOOTYSTATS_API_KEY        -> tu API key de FootyStats
-  GOOGLE_SERVICE_ACCOUNT_JSON -> el contenido COMPLETO del JSON de la cuenta
-                                  de servicio, como un solo string (Railway
-                                  soporta multilínea en variables de entorno)
-  DRIVE_FOLDER_ID           -> ID de la carpeta 01_HARPO en Drive
+  FOOTYSTATS_API_KEY   -> tu API key de FootyStats
+  GOOGLE_CLIENT_ID     -> del cliente OAuth de escritorio creado en Google Cloud
+  GOOGLE_CLIENT_SECRET -> ídem
+  GOOGLE_REFRESH_TOKEN -> generado UNA VEZ con oauth_setup.py (corrido en tu compu)
+  DRIVE_FOLDER_ID      -> ID de la carpeta 01_HARPO en Drive
+
+NOTA: se usa OAuth con tu cuenta personal (no una cuenta de servicio),
+porque las cuentas de servicio no tienen cuota de almacenamiento propia
+en Drive personal — solo funcionan en Shared Drives de Google Workspace.
 
 Cron schedule (configurar en Railway > Settings > Cron Schedule):
   0 9 * * *     -> todos los días a las 9:00 UTC (6:00 AM ART)
@@ -35,7 +39,7 @@ import sys
 from datetime import datetime, timezone
 
 import requests
-from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 import io
@@ -118,14 +122,23 @@ def normalizar_datos(datos_crudos: dict) -> dict:
     return normalizado
 
 
-def subir_a_drive(datos_normalizados: dict, folder_id: str, service_account_json: str) -> str:
+def subir_a_drive(datos_normalizados: dict, folder_id: str, client_id: str,
+                   client_secret: str, refresh_token: str) -> str:
     """
     Sube el archivo normalizado como un archivo NUEVO versionado
     (patrón del proyecto: nunca sobreescribir, siempre crear nueva versión).
+
+    Usa OAuth con la cuenta personal de Fer (no una cuenta de servicio):
+    las cuentas de servicio no tienen cuota de almacenamiento propia en
+    Drive personal (solo en Shared Drives de Google Workspace), así que
+    autenticamos como el usuario real para que el archivo use su cuota.
     """
-    credenciales_dict = json.loads(service_account_json)
-    credenciales = service_account.Credentials.from_service_account_info(
-        credenciales_dict,
+    credenciales = Credentials(
+        token=None,
+        refresh_token=refresh_token,
+        client_id=client_id,
+        client_secret=client_secret,
+        token_uri="https://oauth2.googleapis.com/token",
         scopes=["https://www.googleapis.com/auth/drive.file"],
     )
     servicio = build("drive", "v3", credentials=credenciales)
@@ -146,7 +159,9 @@ def main():
     print(f"[{datetime.now(timezone.utc).isoformat()}] Iniciando job de carga FootyStats...")
 
     api_key = obtener_env("FOOTYSTATS_API_KEY")
-    service_account_json = obtener_env("GOOGLE_SERVICE_ACCOUNT_JSON")
+    client_id = obtener_env("GOOGLE_CLIENT_ID")
+    client_secret = obtener_env("GOOGLE_CLIENT_SECRET")
+    refresh_token = obtener_env("GOOGLE_REFRESH_TOKEN")
     folder_id = obtener_env("DRIVE_FOLDER_ID")
 
     try:
@@ -159,7 +174,7 @@ def main():
     print(f"✅ {len(datos_normalizados['partidos'])} partidos normalizados.")
 
     try:
-        archivo_id = subir_a_drive(datos_normalizados, folder_id, service_account_json)
+        archivo_id = subir_a_drive(datos_normalizados, folder_id, client_id, client_secret, refresh_token)
     except Exception as e:
         print(f"❌ ERROR al subir a Drive: {e}")
         sys.exit(1)
